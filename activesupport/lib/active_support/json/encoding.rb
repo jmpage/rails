@@ -1,4 +1,4 @@
-require 'active_support/core_ext/object/to_json'
+require 'active_support/core_ext/object/json'
 require 'active_support/core_ext/module/delegation'
 require 'active_support/json/variable'
 
@@ -34,9 +34,7 @@ module ActiveSupport
     end
 
     module Encoding #:nodoc:
-      class CircularReferenceError < StandardError; end
-
-      class Encoder
+      class Encoder #:nodoc:
         attr_reader :options
 
         def initialize(options = nil)
@@ -44,90 +42,108 @@ module ActiveSupport
           @seen = Set.new
         end
 
-        def encode(value, use_options = true)
-          check_for_circular_references(value) do
-            jsonified = use_options ? value.as_json(options_for(value)) : value.as_json
-            jsonified.encode_json(self)
-          end
-        end
-
-        # like encode, but only calls as_json, without encoding to string.
-        def as_json(value, use_options = true)
-          check_for_circular_references(value) do
-            use_options ? value.as_json(options_for(value)) : value.as_json
-          end
-        end
-
-        def options_for(value)
-          if value.is_a?(Array) || value.is_a?(Hash)
-            # hashes and arrays need to get encoder in the options, so that
-            # they can detect circular references.
-            options.merge(:encoder => self)
-          else
-            options.dup
-          end
-        end
-
-        def escape(string)
-          Encoding.escape(string)
+        # Encode the given object into a JSON string
+        def encode(value)
+          stringify jsonify value.as_json(options.dup)
         end
 
         private
-          def check_for_circular_references(value)
-            unless @seen.add?(value.__id__)
-              raise CircularReferenceError, 'object references itself'
+          # Rails does more escaping than the JSON gem natively does (we
+          # escape \u2028 and \u2029 and optionally >, <, & to work around
+          # certain browser problems).
+          ESCAPED_CHARS = {
+            "\u2028" => '\u2028',
+            "\u2029" => '\u2029',
+            '>'      => '\u003e',
+            '<'      => '\u003c',
+            '&'      => '\u0026',
+            }
+
+          ESCAPE_REGEX_WITH_HTML_ENTITIES = /[\u2028\u2029><&]/u
+          ESCAPE_REGEX_WITHOUT_HTML_ENTITIES = /[\u2028\u2029]/u
+
+          # This class wraps all the strings we see and does the extra escaping
+          class EscapedString < String
+            def to_json(*)
+              if Encoding.escape_html_entities_in_json
+                super.gsub ESCAPE_REGEX_WITH_HTML_ENTITIES, ESCAPED_CHARS
+              else
+                super.gsub ESCAPE_REGEX_WITHOUT_HTML_ENTITIES, ESCAPED_CHARS
+              end
             end
-            yield
-          ensure
-            @seen.delete(value.__id__)
+          end
+
+          # Mark these as private so we don't leak encoding-specific constructs
+          private_constant :ESCAPED_CHARS, :ESCAPE_REGEX_WITH_HTML_ENTITIES, 
+            :ESCAPE_REGEX_WITHOUT_HTML_ENTITIES, :EscapedString
+
+          # Recursively turn the given object into a "jsonified" Ruby data structure
+          # that the JSON gem understands - i.e. we want only Hash, Array, String,
+          # Numeric, true, false and nil in the final tree. Calls #as_json on it if
+          # it's not from one of these base types.
+          # 
+          # This allows developers to implement #as_json withouth having to worry
+          # about what base types of objects they are allowed to return and having
+          # to remember calling #as_json recursively.
+          # 
+          # By default, the options hash is not passed to the children data structures
+          # to avoid undesiarable result. Develoers must opt-in by implementing
+          # custom #as_json methods (e.g. Hash#as_json and Array#as_json).
+          def jsonify(value)
+            if value.is_a?(Hash)
+              Hash[value.map { |k, v| [jsonify(k), jsonify(v)] }]
+            elsif value.is_a?(Array)
+              value.map { |v| jsonify(v) }
+            elsif value.is_a?(String)
+              EscapedString.new(value)
+            elsif value.is_a?(Numeric)
+              value
+            elsif value == true
+              true
+            elsif value == false
+              false
+            elsif value == nil
+              nil
+            else
+              jsonify value.as_json
+            end
+          end
+
+          # Encode a "jsonified" Ruby data structure using the JSON gem
+          def stringify(jsonified)
+            ::JSON.generate(jsonified, quirks_mode: true, max_nesting: false)
           end
       end
-
-
-      ESCAPED_CHARS = {
-        "\x00" => '\u0000', "\x01" => '\u0001', "\x02" => '\u0002',
-        "\x03" => '\u0003', "\x04" => '\u0004', "\x05" => '\u0005',
-        "\x06" => '\u0006', "\x07" => '\u0007', "\x0B" => '\u000B',
-        "\x0E" => '\u000E', "\x0F" => '\u000F', "\x10" => '\u0010',
-        "\x11" => '\u0011', "\x12" => '\u0012', "\x13" => '\u0013',
-        "\x14" => '\u0014', "\x15" => '\u0015', "\x16" => '\u0016',
-        "\x17" => '\u0017', "\x18" => '\u0018', "\x19" => '\u0019',
-        "\x1A" => '\u001A', "\x1B" => '\u001B', "\x1C" => '\u001C',
-        "\x1D" => '\u001D', "\x1E" => '\u001E', "\x1F" => '\u001F',
-        "\010" =>  '\b',
-        "\f"   =>  '\f',
-        "\n"   =>  '\n',
-        "\r"   =>  '\r',
-        "\t"   =>  '\t',
-        '"'    =>  '\"',
-        '\\'   =>  '\\\\',
-        '>'    =>  '\u003E',
-        '<'    =>  '\u003C',
-        '&'    =>  '\u0026' }
 
       class << self
         # If true, use ISO 8601 format for dates and times. Otherwise, fall back
         # to the Active Support legacy format.
         attr_accessor :use_standard_json_time_format
 
-        attr_accessor :escape_regex
-        attr_reader :escape_html_entities_in_json
+        # If true, encode >, <, & as escaped unicode sequences (e.g. > as \u003e)
+        # as a safety measure.
+        attr_accessor :escape_html_entities_in_json
 
-        def escape_html_entities_in_json=(value)
-          self.escape_regex = \
-            if @escape_html_entities_in_json = value
-              /[\x00-\x1F"\\><&]/
-            else
-              /[\x00-\x1F"\\]/
-            end
-        end
+        # Deprecate CircularReferenceError
+        def const_missing(name)
+          if name == :CircularReferenceError
+            message = "The JSON encoder in Rails 4.1 no longer offers protection from circular references. " \
+                      "You are seeing this warning because you are rescuing from (or otherwise referencing) " \
+                      "ActiveSupport::Encoding::CircularReferenceError. In the future, this error will be " \
+                      "removed from Rails. You should remove these rescue blocks from your code and ensure " \
+                      "that your data structures are free of circular references so they can be properly " \
+                      "serialized into JSON.\n\n" \
+                      "For example, the following Hash contains a circular reference to itself:\n" \
+                      "   h = {}\n" \
+                      "   h['circular'] = h\n" \
+                      "In this case, calling h.to_json would not work properly."
 
-        def escape(string)
-          string = string.encode(::Encoding::UTF_8, :undef => :replace).force_encoding(::Encoding::BINARY)
-          json = string.gsub(escape_regex) { |s| ESCAPED_CHARS[s] }
-          json = %("#{json}")
-          json.force_encoding(::Encoding::UTF_8)
-          json
+            ActiveSupport::Deprecation.warn message
+
+            SystemStackError
+          else
+            super
+          end
         end
       end
 
