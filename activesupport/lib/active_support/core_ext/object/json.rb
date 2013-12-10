@@ -116,9 +116,7 @@ class BigDecimal
   # Use <tt>ActiveSupport.encode_big_decimal_as_string = true</tt> to
   # override this behavior.
   def as_json(options = nil) #:nodoc:
-    puts "This is #{finite?}"
     if finite?
-      puts "Here I am "
       ActiveSupport.encode_big_decimal_as_string ? to_s : self
     else
       nil

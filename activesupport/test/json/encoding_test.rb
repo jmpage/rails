@@ -323,7 +323,11 @@ class TestJSONEncoding < ActiveSupport::TestCase
 
     begin
       ActiveSupport.encode_big_decimal_as_string = false
+puts "blarg: #{big_decimal.method(:to_json).source_location}"
+puts "XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"
+      puts "blah: #{big_decimal.to_json.inspect}, #{big_decimal.to_s.inspect}"
       assert_equal big_decimal.to_s, big_decimal.to_json
+puts "end"
     ensure
       ActiveSupport.encode_big_decimal_as_string = true
     end
